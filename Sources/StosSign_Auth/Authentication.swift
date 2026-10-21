@@ -462,31 +462,44 @@ public final class Authentication {
         anisetteData: AnisetteData,
         verificationHandler: @escaping (@escaping (String?) -> Void) async -> Void
     ) async throws {
-        let requestURL = URL(string: "https://gsa.apple.com/auth/verify/phone/put?mode=sms")!
-        let verifyURL = URL(string: "https://gsa.apple.com/auth/verify/phone/securitycode?referrer=/auth/verify/phone/put")!
-        
-        var request = makeTwoFactorCodeRequest(
-            url: requestURL,
+        // Apple does not guarantee that the trusted phone has ID 1. Fetch the
+        // account's real IDs first; hardcoding 1 makes Apple silently reject
+        // the send request while the UI incorrectly asks for a code.
+        let numbersURL = URL(string: "https://gsa.apple.com/auth")!
+        var numbersRequest = makeTwoFactorCodeRequest(
+            url: numbersURL,
             dsid: dsid,
             idmsToken: idmsToken,
             anisetteData: anisetteData
         )
-        request.httpMethod = "POST"
-        
-        let bodyXML = [
-            "serverInfo": [
-                "phoneNumber.id": "1"
-            ]
-        ] as [String: Any]
-        
-        let bodyData = try PropertyListSerialization.data(
-            fromPropertyList: bodyXML,
-            format: .xml,
-            options: 0
-        )
-        request.httpBody = bodyData
-        
-        let _ = try? await AppleAPI.shared.session.data(for: request)
+        numbersRequest.httpMethod = "GET"
+        numbersRequest.setValue("application/json", forHTTPHeaderField: "Accept")
+        numbersRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let (numbersData, numbersResponse) = try await AppleAPI.shared.session.data(for: numbersRequest)
+        guard let numbersHTTP = numbersResponse as? HTTPURLResponse,
+              (200..<300).contains(numbersHTTP.statusCode),
+              let numbersJSON = try? JSONSerialization.jsonObject(with: numbersData) as? [String: Any],
+              let trustedNumbers = numbersJSON["trustedPhoneNumbers"] as? [[String: Any]],
+              let selectedNumber = trustedNumbers.first,
+              let phoneID = selectedNumber["id"] as? NSNumber else {
+            throw AppleAPIError.customError(code: 0, message: "Apple did not return a trusted phone number")
+        }
+        let phoneIDString = phoneID.stringValue
+
+        let requestURL = URL(string: "https://gsa.apple.com/auth/verify/phone")!
+        var request = makeTwoFactorCodeRequest(url: requestURL, dsid: dsid, idmsToken: idmsToken, anisetteData: anisetteData)
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "phoneNumber": ["id": phoneID],
+            "mode": "sms"
+        ])
+        let (_, sendResponse) = try await AppleAPI.shared.session.data(for: request)
+        guard let sendHTTP = sendResponse as? HTTPURLResponse,
+              (200..<300).contains(sendHTTP.statusCode) else {
+            throw AppleAPIError.customError(code: 0, message: "Apple rejected the SMS request for trusted phone ID \(phoneIDString)")
+        }
         
         let verificationCode = try await withCheckedThrowingContinuation { continuation in
             Task {
@@ -500,28 +513,16 @@ public final class Authentication {
             throw AppleAPIError.requiresTwoFactorAuthentication
         }
         
-        var verifyRequest = makeTwoFactorCodeRequest(
-            url: verifyURL,
-            dsid: dsid,
-            idmsToken: idmsToken,
-            anisetteData: anisetteData
-        )
+        let verifyURL = URL(string: "https://gsa.apple.com/auth/verify/phone/securitycode")!
+        var verifyRequest = makeTwoFactorCodeRequest(url: verifyURL, dsid: dsid, idmsToken: idmsToken, anisetteData: anisetteData)
         verifyRequest.httpMethod = "POST"
-        
-        let verifyBodyXML = [
-            "securityCode.code": code,
-            "serverInfo": [
-                "mode": "sms",
-                "phoneNumber.id": "1"
-            ]
-        ] as [String: Any]
-        
-        let verifyBodyData = try PropertyListSerialization.data(
-            fromPropertyList: verifyBodyXML,
-            format: .xml,
-            options: 0
-        )
-        verifyRequest.httpBody = verifyBodyData
+        verifyRequest.setValue("application/json", forHTTPHeaderField: "Accept")
+        verifyRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        verifyRequest.httpBody = try JSONSerialization.data(withJSONObject: [
+            "securityCode": ["code": code],
+            "phoneNumber": ["id": phoneID],
+            "mode": "sms"
+        ])
         
         let (_, response) = try await AppleAPI.shared.session.data(for: verifyRequest)
         
