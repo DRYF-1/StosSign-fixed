@@ -253,10 +253,15 @@ public final class Authentication {
         var httpHeaders = [
             "Content-Type": "text/x-xml-plist",
             "X-MMe-Client-Info": anisetteData.deviceDescription,
-            "Accept": "*/*",
+            // GrandSlam negotiates the response format from Accept. Using */*
+            // can make Apple return JSON, which then causes Cocoa error 3840
+            // when the response is decoded as an XML plist.
+            "Accept": "text/x-xml-plist",
             // Apple currently rejects the macOS GrandSlam identity with -80045.
             // Match iLoader 2.3.7 and use the Android AuthKit identity.
             "User-Agent": "akd/1.0 CFNetwork/808.1.4",
+            "X-Xcode-Version": "27.0 (27A5218g)",
+            "X-Apple-App-Info": "com.apple.gs.xcode.auth",
             "Connection": "close"
         ]
         
@@ -273,14 +278,22 @@ public final class Authentication {
         
         let (data, _) = try await AppleAPI.shared.session.data(for: request)
         
-        guard let responseDictionary = try PropertyListSerialization.propertyList(
-            from: data,
-            format: nil
-        ) as? [String: Any],
-              let dictionary = responseDictionary["Response"] as? [String: Any],
-              let status = dictionary["Status"] as? [String: Any]
-        else {
-            throw URLError(.badServerResponse)
+        let responseDictionary: [String: Any]
+        do {
+            guard let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
+                throw URLError(.badServerResponse)
+            }
+            responseDictionary = plist
+        } catch {
+            // Preserve the real server payload instead of exposing the opaque
+            // NSCocoaErrorDomain 3840 parsing error to the user.
+            let preview = String(data: data.prefix(512), encoding: .utf8) ?? "<binary response>"
+            throw AppleAPIError.customError(code: 3840, message: "Apple returned an invalid GrandSlam response: \(preview)")
+        }
+
+        guard let dictionary = responseDictionary["Response"] as? [String: Any],
+              let status = dictionary["Status"] as? [String: Any] else {
+            throw AppleAPIError.badServerResponse
         }
         
         let errorCode = status["ec"] as? Int ?? 0
