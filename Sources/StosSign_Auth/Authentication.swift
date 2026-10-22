@@ -15,6 +15,12 @@ import FoundationNetworking
 public typealias AppleAPISession = StosSign_API.AppleAPISession
 public typealias AppleAPIError = StosSign_API.AppleAPIError
 
+public enum TwoFactorMethod: String, Sendable {
+    case trustedDevice
+    case sms
+    case voice
+}
+
 public final class Authentication {
     public init() { }
     
@@ -25,6 +31,7 @@ public final class Authentication {
         password: String,
         anisetteData: AnisetteData,
         smsClientInfo: String? = nil,
+        methodSelectionHandler: (([TwoFactorMethod]) async -> TwoFactorMethod?)? = nil,
         verificationHandler: ((@escaping (String?) -> Void) async -> Void)? = nil
     ) async throws -> (Account, AppleAPISession) {
         let sanitizedAppleID = unsanitizedAppleID.lowercased()
@@ -137,18 +144,20 @@ public final class Authentication {
                 throw AppleAPIError.requiresTwoFactorAuthentication
             }
             
-            try await requestTrustedDeviceTwoFactorCode(
-                dsid: dsid,
-                idmsToken: idmsToken,
-                anisetteData: macOSClientInfo,
-                verificationHandler: verificationHandler
-            )
+            let method = await methodSelectionHandler?([.trustedDevice, .sms, .voice]) ?? .trustedDevice
+            switch method {
+            case .trustedDevice:
+                try await requestTrustedDeviceTwoFactorCode(dsid: dsid, idmsToken: idmsToken, anisetteData: macOSClientInfo, verificationHandler: verificationHandler)
+            case .sms, .voice:
+                try await requestSMSTwoFactorCode(dsid: dsid, idmsToken: idmsToken, anisetteData: macOSClientInfo, mode: method == .voice ? "voice" : "sms", verificationHandler: verificationHandler)
+            }
             
             return try await authenticate(
                 appleID: unsanitizedAppleID,
                 password: password,
                 anisetteData: anisetteData,
                 smsClientInfo: smsClientInfo,
+                methodSelectionHandler: methodSelectionHandler,
                 verificationHandler: verificationHandler
             )
             
@@ -157,18 +166,20 @@ public final class Authentication {
                 throw AppleAPIError.requiresTwoFactorAuthentication
             }
             
-            try await requestSMSTwoFactorCode(
-                dsid: dsid,
-                idmsToken: idmsToken,
-                anisetteData: macOSClientInfo,
-                verificationHandler: verificationHandler
-            )
+            let method = await methodSelectionHandler?([.trustedDevice, .sms, .voice]) ?? .sms
+            switch method {
+            case .trustedDevice:
+                try await requestTrustedDeviceTwoFactorCode(dsid: dsid, idmsToken: idmsToken, anisetteData: macOSClientInfo, verificationHandler: verificationHandler)
+            case .sms, .voice:
+                try await requestSMSTwoFactorCode(dsid: dsid, idmsToken: idmsToken, anisetteData: macOSClientInfo, mode: method == .voice ? "voice" : "sms", verificationHandler: verificationHandler)
+            }
             
             return try await authenticate(
                 appleID: unsanitizedAppleID,
                 password: password,
                 anisetteData: anisetteData,
                 smsClientInfo: smsClientInfo,
+                methodSelectionHandler: methodSelectionHandler,
                 verificationHandler: verificationHandler
             )
             
@@ -220,12 +231,13 @@ public final class Authentication {
         password: String,
         anisetteData: AnisetteData,
         smsClientInfo: String? = nil,
+        methodSelectionHandler: (([TwoFactorMethod]) async -> TwoFactorMethod?)? = nil,
         verificationHandler: ((@escaping (String?) -> Void) -> Void)? = nil,
         completionHandler: @escaping (Account?, AppleAPISession?, Error?) -> Void
     ) {
         Task {
             do {
-                let success = try await authenticate(appleID: unsanitizedAppleID, password: password, anisetteData: anisetteData, smsClientInfo: smsClientInfo) { veri in
+                let success = try await authenticate(appleID: unsanitizedAppleID, password: password, anisetteData: anisetteData, smsClientInfo: smsClientInfo, methodSelectionHandler: methodSelectionHandler) { veri in
                     verificationHandler?(veri)
                 }
                 
@@ -460,6 +472,7 @@ public final class Authentication {
         dsid: String,
         idmsToken: String,
         anisetteData: AnisetteData,
+        mode: String = "sms",
         verificationHandler: @escaping (@escaping (String?) -> Void) async -> Void
     ) async throws {
         // Apple does not guarantee that the trusted phone has ID 1. Fetch the
@@ -493,7 +506,7 @@ public final class Authentication {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "phoneNumber": ["id": phoneID],
-            "mode": "sms"
+            "mode": mode
         ])
         let (_, sendResponse) = try await AppleAPI.shared.session.data(for: request)
         guard let sendHTTP = sendResponse as? HTTPURLResponse,
@@ -521,7 +534,7 @@ public final class Authentication {
         verifyRequest.httpBody = try JSONSerialization.data(withJSONObject: [
             "securityCode": ["code": code],
             "phoneNumber": ["id": phoneID],
-            "mode": "sms"
+            "mode": mode
         ])
         
         let (_, response) = try await AppleAPI.shared.session.data(for: verifyRequest)
