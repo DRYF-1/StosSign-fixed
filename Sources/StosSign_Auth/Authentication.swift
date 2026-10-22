@@ -139,7 +139,7 @@ public final class Authentication {
         
         let authType = statusDictionary["au"] as? String
         switch authType {
-        case "trustedDeviceSecondaryAuth":
+        case "trustedDeviceSecondaryAuth", "trustedDevice", "pushedCode":
             guard let verificationHandler = verificationHandler else {
                 throw AppleAPIError.requiresTwoFactorAuthentication
             }
@@ -149,7 +149,7 @@ public final class Authentication {
             case .trustedDevice:
                 try await requestTrustedDeviceTwoFactorCode(dsid: dsid, idmsToken: idmsToken, anisetteData: macOSClientInfo, verificationHandler: verificationHandler)
             case .sms, .voice:
-                try await requestSMSTwoFactorCode(dsid: dsid, idmsToken: idmsToken, anisetteData: macOSClientInfo, mode: method == .voice ? "voice" : "sms", verificationHandler: verificationHandler)
+                try await requestSMSTwoFactorCode(dsid: dsid, idmsToken: idmsToken, anisetteData: macOSClientInfo, mode: method == .voice ? "voice" : "sms", phoneID: trustedPhoneID(from: statusDictionary) ?? "1", verificationHandler: verificationHandler)
             }
             
             return try await authenticate(
@@ -161,7 +161,7 @@ public final class Authentication {
                 verificationHandler: verificationHandler
             )
             
-        case "secondaryAuth":
+        case "secondaryAuth", "sms", "voice", "phone":
             guard let verificationHandler = verificationHandler else {
                 throw AppleAPIError.requiresTwoFactorAuthentication
             }
@@ -171,7 +171,7 @@ public final class Authentication {
             case .trustedDevice:
                 try await requestTrustedDeviceTwoFactorCode(dsid: dsid, idmsToken: idmsToken, anisetteData: macOSClientInfo, verificationHandler: verificationHandler)
             case .sms, .voice:
-                try await requestSMSTwoFactorCode(dsid: dsid, idmsToken: idmsToken, anisetteData: macOSClientInfo, mode: method == .voice ? "voice" : "sms", verificationHandler: verificationHandler)
+                try await requestSMSTwoFactorCode(dsid: dsid, idmsToken: idmsToken, anisetteData: macOSClientInfo, mode: method == .voice ? "voice" : "sms", phoneID: trustedPhoneID(from: statusDictionary) ?? "1", verificationHandler: verificationHandler)
             }
             
             return try await authenticate(
@@ -272,7 +272,7 @@ public final class Authentication {
             // Apple currently rejects the macOS GrandSlam identity with -80045.
             // Match iLoader 2.3.7 and use the Android AuthKit identity.
             "User-Agent": "akd/1.0 CFNetwork/808.1.4",
-            "X-Xcode-Version": "27.0 (27A5218g)",
+            "X-Xcode-Version": "26.0 (26A242)",
             "X-Apple-App-Info": "com.apple.gs.xcode.auth",
             "Connection": "close"
         ]
@@ -345,7 +345,7 @@ public final class Authentication {
             "Content-Type": "application/x-plist",
             "User-Agent": "Xcode",
             "X-Apple-App-Info": "com.apple.gs.xcode.auth",
-            "X-Xcode-Version": "27.0 (27A5218g)",
+            "X-Xcode-Version": "26.0 (26A242)",
             "X-Apple-Identity-Token": encodedIdentityToken,
             "X-Apple-I-MD-M": anisetteData.machineID,
             "X-Apple-I-MD": anisetteData.oneTimePassword,
@@ -404,6 +404,21 @@ public final class Authentication {
         return authToken
     }
 
+    private static func trustedPhoneID(from status: [String: Any]?) -> String? {
+        guard let status else { return nil }
+        if let phone = status["phoneNumber"] as? [String: Any],
+           let id = phone["id"] as? CustomStringConvertible {
+            return id.description
+        }
+        for key in ["trustedPhoneNumbers", "phoneNumbers"] {
+            if let phones = status[key] as? [[String: Any]],
+               let id = phones.first?["id"] as? CustomStringConvertible {
+                return id.description
+            }
+        }
+        return nil
+    }
+
     public static func requestTrustedDeviceTwoFactorCode(
         dsid: String,
         idmsToken: String,
@@ -411,61 +426,23 @@ public final class Authentication {
         verificationHandler: @escaping (@escaping (String?) -> Void) async -> Void
     ) async throws {
         let requestURL = URL(string: "https://gsa.apple.com/auth/verify/trusteddevice")!
-        let verifyURL = URL(string: "https://gsa.apple.com/grandslam/GsService2/validate")!
-        
-        let request = makeTwoFactorCodeRequest(
-            url: requestURL,
-            dsid: dsid,
-            idmsToken: idmsToken,
-            anisetteData: anisetteData
-        )
-        
-        let _ = try? await AppleAPI.shared.session.data(for: request)
-        
-        
-        let verificationCode = try await withCheckedThrowingContinuation { continuation in
-            Task {
-                await verificationHandler { code in
-                    continuation.resume(returning: code)
-                }
-            }
+        var request = makeTwoFactorCodeRequest(url: requestURL, dsid: dsid, idmsToken: idmsToken, anisetteData: anisetteData)
+        request.httpMethod = "GET"
+        let (data, response) = try await AppleAPI.shared.session.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw AppleAPIError.customError(code: (response as? HTTPURLResponse)?.statusCode ?? 0, message: "Apple rejected trusted-device verification: \(body)")
         }
-        
-        guard let code = verificationCode else {
-            throw AppleAPIError.requiresTwoFactorAuthentication
+
+        let code = try await withCheckedThrowingContinuation { continuation in
+            Task { await verificationHandler { continuation.resume(returning: $0) } }
         }
-        
-        var verifyRequest = makeTwoFactorCodeRequest(
-            url: verifyURL,
-            dsid: dsid,
-            idmsToken: idmsToken,
-            anisetteData: anisetteData
-        )
-        verifyRequest.allHTTPHeaderFields?["security-code"] = code
-        
-        let (data, _) = try await AppleAPI.shared.session.data(for: verifyRequest)
-        
-        guard let responseDictionary = try PropertyListSerialization.propertyList(
-            from: data,
-            format: nil
-        ) as? [String: Any] else {
-            throw URLError(.badServerResponse)
-        }
-        
-        let errorCode = responseDictionary["ec"] as? Int ?? 0
-        guard errorCode == 0 else {
-            switch errorCode {
-            case -21669:
-                throw AppleAPIError.incorrectVerificationCode
-            default:
-                guard let errorDescription = responseDictionary["em"] as? String else {
-                    throw AppleAPIError.unknown
-                }
-                
-                let localizedDescription = errorDescription + " (\(errorCode))"
-                throw AppleAPIError.customError(code: errorCode, message: errorDescription)
-            }
-        }
+        guard let code else { throw AppleAPIError.requiresTwoFactorAuthentication }
+
+        var verifyRequest = makeTwoFactorCodeRequest(url: URL(string: "https://gsa.apple.com/grandslam/GsService2/validate")!, dsid: dsid, idmsToken: idmsToken, anisetteData: anisetteData)
+        verifyRequest.setValue(code, forHTTPHeaderField: "security-code")
+        let (verifyData, verifyResponse) = try await AppleAPI.shared.session.data(for: verifyRequest)
+        try validateTwoFactorResponse(data: verifyData, response: verifyResponse, requirePhoneToken: false)
     }
 
     public static func requestSMSTwoFactorCode(
@@ -473,77 +450,49 @@ public final class Authentication {
         idmsToken: String,
         anisetteData: AnisetteData,
         mode: String = "sms",
+        phoneID: String = "1",
         verificationHandler: @escaping (@escaping (String?) -> Void) async -> Void
     ) async throws {
-        // Apple does not guarantee that the trusted phone has ID 1. Fetch the
-        // account's real IDs first; hardcoding 1 makes Apple silently reject
-        // the send request while the UI incorrectly asks for a code.
-        let numbersURL = URL(string: "https://gsa.apple.com/auth")!
-        var numbersRequest = makeTwoFactorCodeRequest(
-            url: numbersURL,
-            dsid: dsid,
-            idmsToken: idmsToken,
-            anisetteData: anisetteData
-        )
-        numbersRequest.httpMethod = "GET"
-        numbersRequest.setValue("application/json", forHTTPHeaderField: "Accept")
-        numbersRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let (numbersData, numbersResponse) = try await AppleAPI.shared.session.data(for: numbersRequest)
-        guard let numbersHTTP = numbersResponse as? HTTPURLResponse,
-              (200..<300).contains(numbersHTTP.statusCode),
-              let numbersJSON = try? JSONSerialization.jsonObject(with: numbersData) as? [String: Any],
-              let trustedNumbers = numbersJSON["trustedPhoneNumbers"] as? [[String: Any]],
-              let selectedNumber = trustedNumbers.first,
-              let phoneID = selectedNumber["id"] as? NSNumber else {
-            throw AppleAPIError.customError(code: 0, message: "Apple did not return a trusted phone number")
-        }
-        let phoneIDString = phoneID.stringValue
-
-        let requestURL = URL(string: "https://gsa.apple.com/auth/verify/phone")!
+        let requestURL = URL(string: "https://gsa.apple.com/auth/verify/phone/put?mode=\(mode)")!
         var request = makeTwoFactorCodeRequest(url: requestURL, dsid: dsid, idmsToken: idmsToken, anisetteData: anisetteData)
-        request.httpMethod = "PUT"
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "phoneNumber": ["id": phoneID],
-            "mode": mode
-        ])
-        let (_, sendResponse) = try await AppleAPI.shared.session.data(for: request)
-        guard let sendHTTP = sendResponse as? HTTPURLResponse,
-              (200..<300).contains(sendHTTP.statusCode) else {
-            throw AppleAPIError.customError(code: 0, message: "Apple rejected the SMS request for trusted phone ID \(phoneIDString)")
+        request.httpMethod = "POST"
+        request.httpBody = try PropertyListSerialization.data(fromPropertyList: [
+            "serverInfo": ["mode": mode, "phoneNumber.id": phoneID]
+        ], format: .xml, options: 0)
+        let (data, response) = try await AppleAPI.shared.session.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw AppleAPIError.customError(code: (response as? HTTPURLResponse)?.statusCode ?? 0, message: "Apple rejected \(mode) verification for phone ID \(phoneID): \(body)")
         }
-        
-        let verificationCode = try await withCheckedThrowingContinuation { continuation in
-            Task {
-                await verificationHandler { code in
-                    continuation.resume(returning: code)
-                }
-            }
+
+        let code = try await withCheckedThrowingContinuation { continuation in
+            Task { await verificationHandler { continuation.resume(returning: $0) } }
         }
-        
-        guard let code = verificationCode else {
-            throw AppleAPIError.requiresTwoFactorAuthentication
-        }
-        
-        let verifyURL = URL(string: "https://gsa.apple.com/auth/verify/phone/securitycode")!
-        var verifyRequest = makeTwoFactorCodeRequest(url: verifyURL, dsid: dsid, idmsToken: idmsToken, anisetteData: anisetteData)
+        guard let code else { throw AppleAPIError.requiresTwoFactorAuthentication }
+
+        var verifyRequest = makeTwoFactorCodeRequest(url: URL(string: "https://gsa.apple.com/auth/verify/phone/securitycode?referrer=/auth/verify/phone/put")!, dsid: dsid, idmsToken: idmsToken, anisetteData: anisetteData)
         verifyRequest.httpMethod = "POST"
-        verifyRequest.setValue("application/json", forHTTPHeaderField: "Accept")
-        verifyRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        verifyRequest.httpBody = try JSONSerialization.data(withJSONObject: [
-            "securityCode": ["code": code],
-            "phoneNumber": ["id": phoneID],
-            "mode": mode
-        ])
-        
-        let (_, response) = try await AppleAPI.shared.session.data(for: verifyRequest)
-        
-        guard let httpResponse = response as? HTTPURLResponse,
-              httpResponse.statusCode == 200,
-              httpResponse.allHeaderFields.keys.contains("X-Apple-PE-Token")
-        else {
-            throw AppleAPIError.incorrectVerificationCode
+        verifyRequest.httpBody = try PropertyListSerialization.data(fromPropertyList: [
+            "securityCode.code": code,
+            "serverInfo": ["mode": mode, "phoneNumber.id": phoneID]
+        ], format: .xml, options: 0)
+        let (verifyData, verifyResponse) = try await AppleAPI.shared.session.data(for: verifyRequest)
+        try validateTwoFactorResponse(data: verifyData, response: verifyResponse, requirePhoneToken: true)
+    }
+
+    private static func validateTwoFactorResponse(data: Data, response: URLResponse, requirePhoneToken: Bool) throws {
+        let dict = (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any]
+            ?? ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])
+        let status = response as? HTTPURLResponse
+        let errorCode = dict?["ec"] as? Int ?? 0
+        let message = dict?["em"] as? String ?? String(data: data, encoding: .utf8) ?? "Apple returned an invalid verification response"
+        if errorCode == -21669 { throw AppleAPIError.incorrectVerificationCode }
+        if errorCode != 0 { throw AppleAPIError.customError(code: errorCode, message: message) }
+        guard status?.statusCode == 200 else { throw AppleAPIError.customError(code: status?.statusCode ?? 0, message: message) }
+        if requirePhoneToken {
+            let hasToken = status?.allHeaderFields.keys.contains { ($0 as? String)?.lowercased() == "x-apple-pe-token" } == true
+            guard hasToken else { throw AppleAPIError.incorrectVerificationCode }
         }
     }
+
 }
