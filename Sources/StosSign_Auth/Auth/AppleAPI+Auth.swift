@@ -15,8 +15,9 @@ extension AppleAPI {
         password: String,
         anisetteData: AnisetteData,
         smsClientInfo: String? = nil,
+        methodSelectionHandler: (([TwoFactorMethod]) async -> TwoFactorMethod?)? = nil,
         verificationHandler: ((@escaping (String?) -> Void) async -> Void)? = nil
     ) async throws -> (Account, AppleAPISession) {
-        try await Authentication.authenticate(appleID: unsanitizedAppleID, password: password, anisetteData: anisetteData, smsClientInfo: smsClientInfo, verificationHandler: verificationHandler)
+        try await Authentication.authenticate(appleID: unsanitizedAppleID, password: password, anisetteData: anisetteData, smsClientInfo: smsClientInfo, methodSelectionHandler: methodSelectionHandler, verificationHandler: verificationHandler)
     }
 }
