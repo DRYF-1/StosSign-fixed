@@ -38,11 +38,13 @@ public final class Authentication {
         methodSelectionHandler: (([TwoFactorMethod]) async -> TwoFactorMethod?)? = nil,
         verificationHandler: ((@escaping (String?) -> Void) async -> Void)? = nil
     ) async throws -> (Account, AppleAPISession) {
-        let sanitizedAppleID = unsanitizedAppleID.lowercased()
+        let sanitizedAppleID = unsanitizedAppleID
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !sanitizedAppleID.isEmpty, !sanitizedAppleID.contains(" ") else {
+            throw AppleAPIError.customError(code: -80002, message: "Apple ID must be the complete email address without spaces.")
+        }
         let macOSClientInfo: AnisetteData = .init(machineID: anisetteData.machineID, oneTimePassword: anisetteData.oneTimePassword, localUserID: anisetteData.localUserID, routingInfo: anisetteData.routingInfo, deviceUniqueIdentifier: anisetteData.deviceUniqueIdentifier, deviceSerialNumber: anisetteData.deviceSerialNumber, deviceDescription: smsClientInfo ?? anisetteData.deviceDescription, date: anisetteData.date, locale: anisetteData.locale, timeZone: anisetteData.timeZone)
-        
-        print(anisetteData.deviceDescription)
-        print(macOSClientInfo.deviceDescription)
         
         let clientDictionary: [String: Any] = [
             "bootstrap": true,
