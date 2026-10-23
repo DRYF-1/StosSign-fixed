@@ -15,6 +15,10 @@ import FoundationNetworking
 public typealias AppleAPISession = StosSign_API.AppleAPISession
 public typealias AppleAPIError = StosSign_API.AppleAPIError
 
+private enum PushedCodeState {
+    @TaskLocal static var handled = false
+}
+
 public enum TwoFactorMethod: String, Sendable {
     case trustedDevice
     case sms
@@ -129,17 +133,50 @@ public final class Authentication {
             from: decryptedData,
             format: nil
         ) as? [String: Any],
-              let dsid = decryptedDictionary["adsid"] as? String,
-              let idmsToken = decryptedDictionary["GsIdmsToken"] as? String
+              let dsid = (decryptedDictionary["adsid"] as? String)
+                    ?? (decryptedDictionary["dsid"] as? CustomStringConvertible).map({ $0.description }),
+              let idmsToken = (decryptedDictionary["GsIdmsToken"] as? String)
+                    ?? (decryptedDictionary["idmsToken"] as? String)
         else {
             throw URLError(.badServerResponse)
         }
         
         context.dsid = dsid
         
-        let authType = statusDictionary["au"] as? String
+        let authType = (statusDictionary["au"] as? String)
+            ?? ((statusDictionary["hsc"] as? Int) == 409 ? "pushedCode" : nil)
+
+        if authType == "pushedCode" {
+            guard !PushedCodeState.handled,
+                  let verificationHandler else {
+                throw AppleAPIError.requiresTwoFactorAuthentication
+            }
+
+            let verificationCode = try await withCheckedThrowingContinuation { continuation in
+                Task {
+                    await verificationHandler { code in
+                        continuation.resume(returning: code)
+                    }
+                }
+            }
+            guard verificationCode != nil else {
+                throw AppleAPIError.requiresTwoFactorAuthentication
+            }
+
+            return try await PushedCodeState.$handled.withValue(true) {
+                try await authenticate(
+                    appleID: unsanitizedAppleID,
+                    password: password,
+                    anisetteData: anisetteData,
+                    smsClientInfo: smsClientInfo,
+                    methodSelectionHandler: methodSelectionHandler,
+                    verificationHandler: verificationHandler
+                )
+            }
+        }
+
         switch authType {
-        case "trustedDeviceSecondaryAuth", "trustedDevice", "pushedCode":
+        case "trustedDeviceSecondaryAuth", "trustedDevice":
             guard let verificationHandler = verificationHandler else {
                 throw AppleAPIError.requiresTwoFactorAuthentication
             }
