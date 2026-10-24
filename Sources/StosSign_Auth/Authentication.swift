@@ -187,7 +187,7 @@ public final class Authentication {
             case .trustedDevice:
                 try await requestTrustedDeviceTwoFactorCode(dsid: dsid, idmsToken: idmsToken, anisetteData: macOSClientInfo, verificationHandler: verificationHandler)
             case .sms, .voice:
-                try await requestSMSTwoFactorCode(dsid: dsid, idmsToken: idmsToken, anisetteData: macOSClientInfo, mode: method == .voice ? "voice" : "sms", phoneID: trustedPhoneID(from: statusDictionary) ?? "1", verificationHandler: verificationHandler)
+                try await requestSMSTwoFactorCode(dsid: dsid, idmsToken: idmsToken, anisetteData: macOSClientInfo, mode: method == .voice ? "voice" : "sms", phoneID: trustedPhoneID(from: statusDictionary, response: verificationResponse) ?? "1", verificationHandler: verificationHandler)
             }
             
             return try await authenticate(
@@ -209,7 +209,7 @@ public final class Authentication {
             case .trustedDevice:
                 try await requestTrustedDeviceTwoFactorCode(dsid: dsid, idmsToken: idmsToken, anisetteData: macOSClientInfo, verificationHandler: verificationHandler)
             case .sms, .voice:
-                try await requestSMSTwoFactorCode(dsid: dsid, idmsToken: idmsToken, anisetteData: macOSClientInfo, mode: method == .voice ? "voice" : "sms", phoneID: trustedPhoneID(from: statusDictionary) ?? "1", verificationHandler: verificationHandler)
+                try await requestSMSTwoFactorCode(dsid: dsid, idmsToken: idmsToken, anisetteData: macOSClientInfo, mode: method == .voice ? "voice" : "sms", phoneID: trustedPhoneID(from: statusDictionary, response: verificationResponse) ?? "1", verificationHandler: verificationHandler)
             }
             
             return try await authenticate(
@@ -442,18 +442,27 @@ public final class Authentication {
         return authToken
     }
 
-    private static func trustedPhoneID(from status: [String: Any]?) -> String? {
-        guard let status else { return nil }
-        if let phone = status["phoneNumber"] as? [String: Any],
-           let id = phone["id"] as? CustomStringConvertible {
-            return id.description
-        }
-        for key in ["trustedPhoneNumbers", "phoneNumbers"] {
-            if let phones = status[key] as? [[String: Any]],
-               let id = phones.first?["id"] as? CustomStringConvertible {
-                return id.description
+    private static func trustedPhoneID(from status: [String: Any]?, response: [String: Any]? = nil) -> String? {
+        // Apple returns the phone ID in different locations for Mac and mobile identities.
+        // Search the same nested shapes handled by SideSign instead of assuming ID "1".
+        func findID(in value: Any) -> String? {
+            if let dictionary = value as? [String: Any] {
+                if let id = dictionary["id"] as? CustomStringConvertible {
+                    let text = id.description.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !text.isEmpty { return text }
+                }
+                for nested in dictionary.values {
+                    if let id = findID(in: nested) { return id }
+                }
+            } else if let array = value as? [Any] {
+                for nested in array {
+                    if let id = findID(in: nested) { return id }
+                }
             }
+            return nil
         }
+        if let status, let id = findID(in: status) { return id }
+        if let response, let id = findID(in: response) { return id }
         return nil
     }
 
@@ -501,6 +510,21 @@ public final class Authentication {
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             let body = String(data: data, encoding: .utf8) ?? ""
             throw AppleAPIError.customError(code: (response as? HTTPURLResponse)?.statusCode ?? 0, message: "Apple rejected \(mode) verification for phone ID \(phoneID): \(body)")
+        }
+
+        // Apple sometimes returns HTTP 200 while reporting that the code was
+        // not sent in the plist body (ec/em). The old implementation ignored
+        // that body and opened the code field, making it look like SMS was
+        // sent. SideSign checks this response before asking for the code.
+        let responseDictionary = (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any]
+            ?? ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])
+        let responseStatus = responseDictionary?["Status"] as? [String: Any]
+        let errorCode = (responseDictionary?["ec"] as? Int) ?? (responseStatus?["ec"] as? Int) ?? 0
+        if errorCode != 0 {
+            let message = (responseDictionary?["em"] as? String)
+                ?? (responseStatus?["em"] as? String)
+                ?? "Apple did not send the verification code."
+            throw AppleAPIError.customError(code: errorCode, message: message)
         }
 
         let code = try await withCheckedThrowingContinuation { continuation in
