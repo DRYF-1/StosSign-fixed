@@ -41,9 +41,6 @@ public final class Authentication {
         let sanitizedAppleID = unsanitizedAppleID
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
-        guard !sanitizedAppleID.isEmpty, !sanitizedAppleID.contains(" ") else {
-            throw AppleAPIError.customError(code: -80002, message: "Apple ID must be the complete email address without spaces.")
-        }
         let macOSClientInfo: AnisetteData = .init(machineID: anisetteData.machineID, oneTimePassword: anisetteData.oneTimePassword, localUserID: anisetteData.localUserID, routingInfo: anisetteData.routingInfo, deviceUniqueIdentifier: anisetteData.deviceUniqueIdentifier, deviceSerialNumber: anisetteData.deviceSerialNumber, deviceDescription: smsClientInfo ?? anisetteData.deviceDescription, date: anisetteData.date, locale: anisetteData.locale, timeZone: anisetteData.timeZone)
         
         let clientDictionary: [String: Any] = [
@@ -167,7 +164,7 @@ public final class Authentication {
 
             return try await PushedCodeState.$handled.withValue(true) {
                 try await authenticate(
-                    appleID: unsanitizedAppleID,
+                    appleID: sanitizedAppleID,
                     password: password,
                     anisetteData: anisetteData,
                     smsClientInfo: smsClientInfo,
@@ -192,7 +189,7 @@ public final class Authentication {
             }
             
             return try await authenticate(
-                appleID: unsanitizedAppleID,
+                appleID: sanitizedAppleID,
                 password: password,
                 anisetteData: anisetteData,
                 smsClientInfo: smsClientInfo,
@@ -214,7 +211,7 @@ public final class Authentication {
             }
             
             return try await authenticate(
-                appleID: unsanitizedAppleID,
+                appleID: sanitizedAppleID,
                 password: password,
                 anisetteData: anisetteData,
                 smsClientInfo: smsClientInfo,
