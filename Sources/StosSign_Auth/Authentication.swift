@@ -115,7 +115,7 @@ public final class Authentication {
         
         guard let serverVerificationMessage = verificationResponse["M2"] as? Data,
               let serverDictionary = verificationResponse["spd"] as? Data,
-              let statusDictionary = verificationResponse["Status"] as? [String: Any]
+              let statusDictionary = (verificationResponse["Status"] as? [String: Any]) ?? [:]
         else {
             throw URLError(.badServerResponse)
         }
@@ -143,6 +143,7 @@ public final class Authentication {
         context.dsid = dsid
         
         let authType = (statusDictionary["au"] as? String)
+            ?? (verificationResponse["au"] as? String)
             ?? ((statusDictionary["hsc"] as? Int) == 409 ? "pushedCode" : nil)
 
         if authType == "pushedCode" {
