@@ -114,11 +114,12 @@ public final class Authentication {
         )
         
         guard let serverVerificationMessage = verificationResponse["M2"] as? Data,
-              let serverDictionary = verificationResponse["spd"] as? Data,
-              let statusDictionary = (verificationResponse["Status"] as? [String: Any]) ?? [:]
+              let serverDictionary = verificationResponse["spd"] as? Data
         else {
             throw URLError(.badServerResponse)
         }
+
+        let statusDictionary = (verificationResponse["Status"] as? [String: Any]) ?? [:]
         
         guard context.verifyServerVerificationMessage(serverVerificationMessage) else {
             throw AppleAPIError.authenticationHandshakeFailed
